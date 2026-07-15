@@ -82,43 +82,60 @@ class GrpcEntrypointAdapter(EntrypointAdapter):
     def get_result_attributes(self, worker_ctx, result):
         attributes = {}
 
-        if self.config.get("send_response_payloads"):
-            cardinality = worker_ctx.entrypoint.cardinality
-            if cardinality in (Cardinality.UNARY_STREAM, Cardinality.STREAM_STREAM):
-                messages = []
-                # result is tee'd in handle_result because the service
-                # has already drained the iterator by the time we get here
-                try:
-                    messages.extend(
-                        serialise_to_string(scrub(MessageToDict(res), self.config))
-                        for res in result_iterators.pop(worker_ctx, {})
-                        if res is not None
-                    )
-                except Exception as exc:
+        send_payloads = self.config.get("send_response_payloads")
+        send_size = self.config.get("send_response_size")
+
+        if not (send_payloads or send_size):
+            return attributes
+
+        cardinality = worker_ctx.entrypoint.cardinality
+        if cardinality in (Cardinality.UNARY_STREAM, Cardinality.STREAM_STREAM):
+            messages = []
+            size = 0
+            # result is tee'd in handle_result because the service
+            # has already drained the iterator by the time we get here
+            try:
+                for res in result_iterators.pop(worker_ctx, {}):
+                    if res is None:
+                        continue
+                    if send_payloads:
+                        messages.append(
+                            serialise_to_string(scrub(MessageToDict(res), self.config))
+                        )
+                    if send_size:
+                        size += res.ByteSize()
+            except Exception as exc:
+                if send_payloads:
                     messages.append(f"{type(exc).__name__}: {exc}")
 
-                response_string = " | ".join(messages)
+            response_string = " | ".join(messages)
 
-            else:
-                (res,) = result
-                if res is not None:
+        else:
+            (res,) = result
+            if res is not None:
+                if send_payloads:
                     response_string = serialise_to_string(
                         scrub(MessageToDict(res), self.config)
                     )
-                else:
-                    response_string = ""
+                if send_size:
+                    size = res.ByteSize()
+            else:
+                response_string = ""
+                size = 0
 
+        if send_payloads:
             response_truncated, truncated = truncate(
                 response_string,
                 max_len=self.config.get("truncate_max_length"),
             )
-
             attributes.update(
                 {
                     "rpc.grpc.response": response_truncated,
                     "rpc.grpc.response_truncated": str(truncated),
                 }
             )
+        if send_size:
+            attributes["rpc.grpc.response.size"] = size
 
         return attributes
 

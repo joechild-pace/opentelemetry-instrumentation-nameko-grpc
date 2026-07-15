@@ -24,6 +24,8 @@ config = dict(
     send_request_payloads=True,
     # turn on logging of response payloads and entrypoint results
     send_response_payloads=True,
+    # turn on logging of the serialised response size, in bytes
+    send_response_size=True,
     # change the default length at which headers and payloads are truncated
     max_truncate_length=1000,
 )
