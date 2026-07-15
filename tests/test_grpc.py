@@ -939,7 +939,7 @@ class TestExceptions:
         event = server_span.events[0]
 
         assert event.name == "exception"
-        assert event.attributes["exception.type"] == "Error"
+        assert event.attributes["exception.type"].endswith(".Error")
         assert event.attributes["exception.message"] == "boom"
 
     def test_raise_grpc_error(self, protos, client, container, memory_exporter):
@@ -956,7 +956,10 @@ class TestExceptions:
         event = server_span.events[0]
 
         assert event.name == "exception"
-        assert event.attributes["exception.type"] == "GrpcError"
+        assert (
+            event.attributes["exception.type"]
+            == f"{GrpcError.__module__}.{GrpcError.__qualname__}"
+        )
         assert event.attributes["exception.message"] == "Not allowed!"
 
     def test_error_via_context(self, protos, client, container, memory_exporter):
@@ -991,7 +994,7 @@ class TestExceptions:
         event = server_span.events[0]
 
         assert event.name == "exception"
-        assert event.attributes["exception.type"] == "Error"
+        assert event.attributes["exception.type"].endswith(".Error")
         assert event.attributes["exception.message"] == "boom"
 
     def test_raise_grpc_error_in_stream(
@@ -1013,7 +1016,10 @@ class TestExceptions:
         event = server_span.events[0]
 
         assert event.name == "exception"
-        assert event.attributes["exception.type"] == "GrpcError"
+        assert (
+            event.attributes["exception.type"]
+            == f"{GrpcError.__module__}.{GrpcError.__qualname__}"
+        )
         assert event.attributes["exception.message"] == "Out of tokens!"
 
     def test_stream_error_via_context(self, protos, client, container, memory_exporter):
