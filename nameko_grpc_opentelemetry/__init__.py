@@ -95,9 +95,12 @@ class GrpcEntrypointAdapter(EntrypointAdapter):
             # result is tee'd in handle_result because the service
             # has already drained the iterator by the time we get here
             try:
-                for res in result_iterators.pop(worker_ctx, {}):
-                    if res is None:
-                        continue
+                results = (
+                    res
+                    for res in result_iterators.pop(worker_ctx, {})
+                    if res is not None
+                )
+                for res in results:
                     if send_payloads:
                         messages.append(
                             serialise_to_string(scrub(MessageToDict(res), self.config))

@@ -771,6 +771,9 @@ class TestResultSizeAttributes:
 
         grpc = Grpc.implementing(services.exampleStub)
 
+        class Error(Exception):
+            pass
+
         class ExampleService:
             name = "example"
 
@@ -783,6 +786,15 @@ class TestResultSizeAttributes:
             def unary_stream(self, request, context):
                 message = request.value * (request.multiplier or 1)
                 for i in range(request.response_count):
+                    yield protos.ExampleReply(message=message, seqno=i + 1)
+
+            @grpc
+            def stream_error(self, request, context):
+                message = request.value * (request.multiplier or 1)
+                for i in range(request.response_count):  # pragma: no cover
+                    # raise on the last message
+                    if i == request.response_count - 1:
+                        raise Error("boom")
                     yield protos.ExampleReply(message=message, seqno=i + 1)
 
         container = container_factory(ExampleService)
@@ -846,6 +858,31 @@ class TestResultSizeAttributes:
             assert attributes["rpc.grpc.response.size"] == expected_size
         else:
             assert "rpc.grpc.response.size" not in attributes
+
+    def test_error_in_stream(
+        self, container, client, protos, memory_exporter, send_response_size
+    ):
+        with entrypoint_waiter(container, "stream_error"):
+            responses = client.stream_error(
+                protos.ExampleRequest(value="A", response_count=2)
+            )
+            with pytest.raises(GrpcError):
+                list(responses)
+
+        spans = memory_exporter.get_finished_spans()
+        assert len(spans) == 2
+
+        server_span = list(filter(lambda span: span.kind == SpanKind.SERVER, spans))[0]
+
+        attributes = server_span.attributes
+
+        # one message is yielded successfully before the exception is raised
+        if send_response_size:
+            expected_size = protos.ExampleReply(message="A", seqno=1).ByteSize()
+            assert attributes["rpc.grpc.response.size"] == expected_size
+        else:
+            assert "rpc.grpc.response.size" not in attributes
+        assert "rpc.grpc.response" not in attributes
 
 
 class TestNoTracer:
