@@ -753,6 +753,138 @@ class TestResultAttributes:
             assert "rpc.grpc.response_truncated" not in attributes
 
 
+class TestResultSizeAttributes:
+    @pytest.fixture(
+        params=[True, False], ids=["send_response_size", "no_response_size"]
+    )
+    def send_response_size(self, request):
+        return request.param
+
+    @pytest.fixture
+    def config(self, config, send_response_size):
+        config["send_response_payloads"] = False
+        config["send_response_size"] = send_response_size
+        return config
+
+    @pytest.fixture
+    def container(self, protos, services, container_factory):
+
+        grpc = Grpc.implementing(services.exampleStub)
+
+        class Error(Exception):
+            pass
+
+        class ExampleService:
+            name = "example"
+
+            @grpc
+            def unary_unary(self, request, context):
+                message = request.value * (request.multiplier or 1)
+                return protos.ExampleReply(message=message)
+
+            @grpc
+            def unary_stream(self, request, context):
+                message = request.value * (request.multiplier or 1)
+                for i in range(request.response_count):
+                    yield protos.ExampleReply(message=message, seqno=i + 1)
+
+            @grpc
+            def stream_error(self, request, context):
+                message = request.value * (request.multiplier or 1)
+                for i in range(request.response_count):  # pragma: no cover
+                    # raise on the last message
+                    if i == request.response_count - 1:
+                        raise Error("boom")
+                    yield protos.ExampleReply(message=message, seqno=i + 1)
+
+        container = container_factory(ExampleService)
+        container.start()
+
+        yield container
+
+        container.stop()
+
+    @pytest.fixture
+    def client(self, grpc_port, container, services):
+        with Client(
+            "//localhost:{}".format(grpc_port),
+            services.exampleStub,
+        ) as client:
+            yield client
+
+    def test_unary_response(
+        self, container, client, protos, memory_exporter, send_response_size
+    ):
+        with entrypoint_waiter(container, "unary_unary"):
+            response = client.unary_unary(protos.ExampleRequest(value="A"))
+            assert response.message == "A"
+
+        spans = memory_exporter.get_finished_spans()
+        assert len(spans) == 2
+
+        server_span = list(filter(lambda span: span.kind == SpanKind.SERVER, spans))[0]
+
+        attributes = server_span.attributes
+        if send_response_size:
+            expected_size = protos.ExampleReply(message="A").ByteSize()
+            assert attributes["rpc.grpc.response.size"] == expected_size
+        else:
+            assert "rpc.grpc.response.size" not in attributes
+
+    def test_stream_response(
+        self, container, client, protos, memory_exporter, send_response_size
+    ):
+        with entrypoint_waiter(container, "unary_stream"):
+            responses = client.unary_stream(
+                protos.ExampleRequest(value="A", response_count=2)
+            )
+            assert [(response.message, response.seqno) for response in responses] == [
+                ("A", 1),
+                ("A", 2),
+            ]
+
+        spans = memory_exporter.get_finished_spans()
+        assert len(spans) == 2
+
+        server_span = list(filter(lambda span: span.kind == SpanKind.SERVER, spans))[0]
+
+        attributes = server_span.attributes
+
+        if send_response_size:
+            expected_size = (
+                protos.ExampleReply(message="A", seqno=1).ByteSize()
+                + protos.ExampleReply(message="A", seqno=2).ByteSize()
+            )
+            assert attributes["rpc.grpc.response.size"] == expected_size
+        else:
+            assert "rpc.grpc.response.size" not in attributes
+
+    def test_error_in_stream(
+        self, container, client, protos, memory_exporter, send_response_size
+    ):
+        with entrypoint_waiter(container, "stream_error"):
+            responses = client.stream_error(
+                protos.ExampleRequest(value="A", response_count=2)
+            )
+            with pytest.raises(GrpcError):
+                list(responses)
+
+        spans = memory_exporter.get_finished_spans()
+        assert len(spans) == 2
+
+        server_span = list(filter(lambda span: span.kind == SpanKind.SERVER, spans))[0]
+
+        attributes = server_span.attributes
+
+        # one message is yielded successfully before the exception is raised
+        if send_response_size:
+            expected_size = protos.ExampleReply(message="A", seqno=1).ByteSize()
+            assert attributes["rpc.grpc.response.size"] == expected_size
+        else:
+            assert "rpc.grpc.response.size" not in attributes
+        assert "rpc.grpc.response" not in attributes
+
+
 class TestNoTracer:
     @pytest.fixture
     def container(self, protos, services, container_factory):
@@ -939,7 +1071,7 @@ class TestExceptions:
         event = server_span.events[0]
 
         assert event.name == "exception"
-        assert event.attributes["exception.type"] == "Error"
+        assert event.attributes["exception.type"].endswith(".Error")
         assert event.attributes["exception.message"] == "boom"
 
     def test_raise_grpc_error(self, protos, client, container, memory_exporter):
@@ -956,7 +1088,10 @@ class TestExceptions:
         event = server_span.events[0]
 
         assert event.name == "exception"
-        assert event.attributes["exception.type"] == "GrpcError"
+        assert (
+            event.attributes["exception.type"]
+            == f"{GrpcError.__module__}.{GrpcError.__qualname__}"
+        )
         assert event.attributes["exception.message"] == "Not allowed!"
 
     def test_error_via_context(self, protos, client, container, memory_exporter):
@@ -991,7 +1126,7 @@ class TestExceptions:
         event = server_span.events[0]
 
         assert event.name == "exception"
-        assert event.attributes["exception.type"] == "Error"
+        assert event.attributes["exception.type"].endswith(".Error")
         assert event.attributes["exception.message"] == "boom"
 
     def test_raise_grpc_error_in_stream(
@@ -1013,7 +1148,10 @@ class TestExceptions:
         event = server_span.events[0]
 
         assert event.name == "exception"
-        assert event.attributes["exception.type"] == "GrpcError"
+        assert (
+            event.attributes["exception.type"]
+            == f"{GrpcError.__module__}.{GrpcError.__qualname__}"
+        )
         assert event.attributes["exception.message"] == "Out of tokens!"
 
     def test_stream_error_via_context(self, protos, client, container, memory_exporter):
